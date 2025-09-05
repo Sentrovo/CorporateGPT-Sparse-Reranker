@@ -32,6 +32,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+# feste Defaults (überschreibbar via Env)
+MAX_WORKERS_PDF = _env_int("MAX_WORKERS_PDF", 10)
+MAX_WORKERS_SPARSE = _env_int("MAX_WORKERS_SPARSE", 2)
+
 # === SPLADE MODEL INITIALIZATION ===
 splade_model = None
 splade_tokenizer = None
@@ -214,7 +224,7 @@ def process_pdfs_from_urls_batch():
                 }
 
         # Process PDFs in parallel using ThreadPool
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS_PDF) as executor:
             futures = [
                 executor.submit(process_single_pdf, pdf_request, i) 
                 for i, pdf_request in enumerate(pdf_requests)
@@ -359,7 +369,7 @@ def compute_sparse_batch():
             return result
 
         # Process texts in parallel using ThreadPool
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS_SPARSE) as executor:
             futures = [
                 executor.submit(process_single_text, text, i) 
                 for i, text in enumerate(texts)
