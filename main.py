@@ -13,6 +13,7 @@ import requests
 from typing import List, Dict, Optional
 from urllib.parse import urlparse
 
+
 # === Drittanbieter-Module ===
 import fitz  # PyMuPDF
 from flask import Flask, request, jsonify
@@ -21,6 +22,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 from concurrent.futures import ThreadPoolExecutor
+from flashrank import Ranker, RerankRequest
 
 # === FLASK APP SETUP ===
 app = Flask(__name__)
@@ -31,6 +33,8 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize FlashRank ranker at module level
+ranker = None
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -503,12 +507,158 @@ def calculate_page_coverage_exact(chunk_start: int, chunk_end: int, overlapping_
 
     return coverage
 
+# === FLASHRANK RE-RANKING ===
+from flashrank import Ranker, RerankRequest
+
+# Initialize FlashRank ranker at module level
+ranker = None
+
+def initialize_flashrank():
+    """Initialize FlashRank model"""
+    global ranker
+
+    # You can choose different models based on your needs:
+    # - Default: ~4MB, fastest
+    # - ms-marco-MiniLM-L-12-v2: ~34MB, best performance
+    # - rank-T5-flan: ~110MB, best zero-shot performance
+    # - ms-marco-MultiBERT-L-12: ~150MB, multilingual support
+
+    model_name = os.getenv('FLASHRANK_MODEL', 'ms-marco-TinyBERT-L-2-v2')  # Default model
+    max_length = int(os.getenv('FLASHRANK_MAX_LENGTH', '512'))
+
+    logger.info(f"Loading FlashRank model: {model_name}")
+    ranker = Ranker(model_name=model_name, max_length=max_length)
+    logger.info("FlashRank model loaded successfully")
+
+
+@app.route('/rerank', methods=['POST'])
+def rerank_documents():
+    """
+    Re-rank documents using FlashRank
+
+    Expected input format:
+    {
+        "model": "rerank-v3.5",  // Optional, for compatibility
+        "query": "Your search query",
+        "documents": [
+            "{\"title\":\"...\",\"content\":\"...\",\"page\":\"...\",\"file\":\"...\"}",
+            "{\"title\":\"...\",\"content\":\"...\",\"page\":\"...\",\"file\":\"...\"}",
+            ...
+        ],
+        "top_n": 10,  // Optional, default: all documents
+        "max_tokens_per_doc": 4096  // Optional, for truncation
+    }
+
+    Returns:
+    {
+      "results": [
+        {
+          "index": 0,
+          "relevance_score": 0.95
+        },
+        {
+          "index": 2,
+          "relevance_score": 0.87
+        },
+        ...
+      ]
+    }
+    """
+    try:
+        data = request.json
+
+        query = data.get('query')
+        documents_raw = data.get('documents', [])
+        top_n = data.get('top_n', None)
+        max_tokens_per_doc = data.get('max_tokens_per_doc', 4096)
+
+        if not query:
+            return jsonify({
+                "error": "No query provided"
+            }), 400
+
+        if not documents_raw or not isinstance(documents_raw, list):
+            return jsonify({
+                "error": "No documents array provided"
+            }), 400
+
+        logger.info(f"Re-ranking {len(documents_raw)} documents for query: {query[:100]}...")
+
+        # Parse JSON strings in documents array
+        passages = []
+        for idx, doc_str in enumerate(documents_raw):
+            try:
+                # Parse the JSON string
+                doc = json.loads(doc_str) if isinstance(doc_str, str) else doc_str
+
+                # Extract content for re-ranking
+                # Combine title and content for better ranking
+                text = ""
+                if doc.get('title'):
+                    text += doc['title'] + "\n\n"
+                if doc.get('content'):
+                    text += doc['content']
+
+                # Truncate if too long (rough estimate: 1 token ≈ 4 chars)
+                max_chars = max_tokens_per_doc * 4
+                if len(text) > max_chars:
+                    text = text[:max_chars]
+
+                passages.append({
+                    "id": idx,
+                    "text": text,
+                    "meta": {
+                        "original_document": doc
+                    }
+                })
+
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse document at index {idx}: {str(e)}")
+                # Skip invalid documents
+                continue
+
+        if not passages:
+            return jsonify({
+                "error": "No valid documents to re-rank"
+            }), 400
+
+        # Create rerank request
+        rerank_request = RerankRequest(query=query, passages=passages)
+
+        # Perform re-ranking
+        rerank_results = ranker.rerank(rerank_request)
+
+        # Limit results if top_n is specified
+        if top_n and top_n > 0:
+            rerank_results = rerank_results[:top_n]
+
+        # Format response
+        results = []
+        for result in rerank_results:
+            results.append({
+                "index": result["id"],
+                "relevance_score": float(result["score"])
+            })
+
+        logger.info(f"Re-ranking complete: returned {len(results)} documents")
+
+        return jsonify({
+            "results": results
+        })
+
+    except Exception as e:
+        logger.error(f"Re-ranking failed: {str(e)}")
+        return jsonify({
+            "error": f"Re-ranking failed: {str(e)}"
+        }), 500
+
 # === HEALTH CHECK ===
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check for all services"""
     model_status = "loaded" if splade_model else "not_loaded"
+    ranker_status = "loaded" if ranker else "not_loaded"
     device = "unknown"
 
     if splade_model:
@@ -519,29 +669,24 @@ def health_check():
 
     return jsonify({
         "status": "healthy",
-        "services": ["splade_sparse_vectors", "pdf_processing", "url_processing"],
+        "services": ["splade_sparse_vectors", "pdf_processing", "url_processing", "reranking"],
         "splade_model": {
             "status": model_status,
             "model_id": "naver/splade-v3-lexical",
             "device": device
         },
+        "flashrank_model": {
+            "status": ranker_status,
+            "model_id": os.getenv('FLASHRANK_MODEL', 'ms-marco-TinyBERT-L-2-v2')
+        },
         "endpoints": {
             "sparse": ["/sparse/batch", "/sparse"],
             "pdf": ["/pdf/extract-and-chunk"],
             "url_processing": ["/pdf/process-url", "/pdf/process-urls-batch"],
+            "reranking": ["/rerank"],
             "system": ["/health"]
         },
-        "version": "4.0.0-splade-integration"
-    })
-
-@app.route('/', methods=['GET'])
-def root():
-    """Root endpoint with service information"""
-    return jsonify({
-        "message": "Sparse Vector + PDF Processing Service (URL Download Support)",
-        "services": ["sparse_vectors", "pdf_processing", "url_processing"],
-        "health_check": "/health",
-        "version": "3.0.0-url-support"
+        "version": "5.0.0-flashrank-integration"
     })
 
 # === ERROR HANDLERS ===
@@ -566,10 +711,16 @@ def internal_error(error):
 try:
     initialize_splade()
     logger.info("SPLADE model initialization complete")
+
+    initialize_flashrank()
+    logger.info("FlashRank model initialization complete")
+
 except Exception as e:
-    logger.error(f"Failed to initialize SPLADE model: {str(e)}")
+    logger.error(f"Failed to initialize models: {str(e)}")
     raise
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    
