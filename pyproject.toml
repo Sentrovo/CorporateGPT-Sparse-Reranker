@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "splade-api"
+name = "CorporateGPT-Sparse-Reranker"
 version = "0.1.0"
-description = "SPLADE v3 Lexical API"
-authors = ["Your Name <you@example.com>"]
+description = "CorporateGPT-Sparse-Reranker"
+authors = ["Sentrovo <info@sentrovo.de>"]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.12"
