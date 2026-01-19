@@ -1,17 +1,18 @@
-FROM python:3.11.9-slim@sha256:f7bd7e55b25a9e498c3445fcba10f1e0305ad00fbbf1c29c51d1ecdb1bd93c0c
+FROM python:3.11.9-slim
 
 WORKDIR /app
 
-# System Dependencies (ohne Version-Pins für Security Updates)
+# System Dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Python Dependencies
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml ./
 RUN pip install --no-cache-dir poetry==2.3.0 && \
     poetry config virtualenvs.create false && \
+    poetry lock && \
     poetry install --only main --no-interaction --no-ansi --no-root
 
 # Application Code
