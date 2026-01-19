@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  sparse-reranker:
+    build: .
+    container_name: sparse-reranker
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - PORT=8000
+      - MAX_WORKERS_PDF=10
+      - MAX_WORKERS_SPARSE=2
+      - FLASHRANK_MODEL=ms-marco-TinyBERT-L-2-v2
+      - FLASHRANK_MAX_LENGTH=512
+    volumes:
+      - ./models:/models
+      - ./logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
